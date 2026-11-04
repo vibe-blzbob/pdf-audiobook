@@ -1,35 +1,30 @@
-# 🎧 PDF Audiobook (Scribe)
+# 🎧 Offline Neural Ebook Reader (PWA)
 
-A modern, accessible document-to-audiobook web application built with **Next.js 16 (App Router)**, **React 19**, **TypeScript**, **Tailwind CSS v4**, and **Zustand**. 
+A 100% client-side, offline neural ebook and audiobook reader built with **Vite**, **React 19**, **TypeScript**, **Tailwind CSS v4**, and **Kokoro TTS (ONNX Runtime Web / WebGPU)**.
 
-Transforms PDFs, Markdown files, and text documents into spoken audiobooks with sentence-level karaoke highlighting, dual-deck gapless playback, and support for both neural cloud TTS and offline browser speech synthesis.
+Transforms EPUBs, PDFs, and text documents into spoken audiobooks using state-of-the-art **neural voices completely offline** inside the browser with zero cloud API keys, zero subscriptions, and zero backend servers.
 
 ---
 
 ## ✨ Features
 
-### 📄 Smart Document Ingestion & Parsing
-- **Multi-Format Support:** Reads `.pdf`, `.md`, `.markdown`, and `.txt` documents.
-- **Structured PDF Extraction:** Powered by `pdfjs-dist` to reconstruct paragraphs, vertical layout bounds, and page groupings.
-- **Intelligent Sentence Segmentation:** Uses the ECMAScript `Intl.Segmenter` API (with regex fallback) to split text cleanly into individual spoken units without breaking abbreviations or numbers.
+### 📖 Native EPUB & Document Ingestion
+- **Primarily EPUBs:** Parses standard `.epub` books, extracts the Table of Contents, chapter navigation, and clean semantic text without layout clutter.
+- **PDF & Plain Text Support:** Also supports `.pdf`, `.md`, and `.txt` files with automated page/sentence reconstruction.
+- **Sentence Segmentation:** Uses ECMAScript standard `Intl.Segmenter` to split chapters into natural spoken sentences.
 
-### 🎙️ Dual-Engine Audio Architecture
-- **Cloud Neural TTS (OpenAI):** Supports high-fidelity OpenAI `tts-1` voices (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`) via `/api/tts` with caching.
-- **Zero-Config Browser Speech Fallback:** Automatically falls back to the native Web Speech API (`speechSynthesis`) if no API key is configured or when running offline.
-- **Dual-Deck Gapless Playback Engine:** Utilizes two alternating HTML5 audio elements (`Deck A` and `Deck B`) and lookahead pre-fetching so subsequent sentences start seamlessly with zero buffering latency.
-- **Natural Pacing:** Inserts a subtle natural breathing pause (250ms) between sentences for comfortable long-form listening.
-- **Full Document Pre-Synthesis:** Option to batch pre-synthesize the entire document with live progress indicators.
+### 🎙️ 100% Offline Neural Speech Synthesis
+- **Kokoro-js (82M ONNX Model):** Runs locally via WebGPU (with WebAssembly fallback). Produces studio-grade natural human speech.
+- **50+ Pre-Packaged Neural Voices:** Includes top-rated voices like `Heart (American Female)`, `Bella`, `Nicole`, `Adam (American Male)`, `Emma (British Female)`, and `George (British Male)`.
+- **Zero API Costs:** No OpenAI, ElevenLabs, or monthly credits required.
+- **Dual-Deck Gapless Playback:** Alternates between audio decks with lookahead pre-synthesis and natural breathing pauses (250ms) between sentences.
+- **Web Speech Fallback:** Instant fallback to browser-installed system voices if WebGPU/WASM is unavailable.
 
-### 📖 Synchronized Text Reader UI
-- **Karaoke Sentence Highlighting:** Active sentences are dynamically highlighted in real-time as they are spoken.
-- **Auto-Scroll Tracking:** Smoothly centers the currently spoken sentence in view while reading.
-- **Click-to-Speak:** Click any sentence in the reader or highlight a snippet to immediately jump audio playback to that position.
-- **Page Jump Navigation:** Jump directly to any page with automatic audio re-anchoring.
-
-### 🔖 Bookmarks & Annotation System
-- **Sentence & Selection Bookmarks:** Save key sentences or highlighted text segments with exact page numbers and timestamps.
-- **Slide-Out Bookmarks Drawer:** Browse, jump to, and delete saved bookmarks at any time.
-- **Persistent Storage:** Bookmarks and voice preferences automatically persist across sessions via Zustand's `localStorage` middleware.
+### ⚡ Offline PWA & Library Persistence
+- **Progressive Web App (PWA):** Installs directly to desktop or mobile via `vite-plugin-pwa` with full Service Worker caching.
+- **Persistent Reading State:** Automatically preserves your active book, chapter, and reading position across sessions in IndexedDB (`idb-keyval`).
+- **Karaoke Sentence Tracking:** Synchronized text highlighting with auto-centering and click-to-speak sentence jumping.
+- **Bookmarks Drawer:** Save sentences or chapters and jump back anytime.
 
 ---
 
@@ -37,13 +32,15 @@ Transforms PDFs, Markdown files, and text documents into spoken audiobooks with 
 
 | Layer | Technology |
 | :--- | :--- |
-| **Framework** | [Next.js 16 (App Router)](https://nextjs.org/) |
-| **Frontend** | [React 19](https://react.dev/), [TypeScript](https://www.typescriptlang.org/) |
-| **Styling** | [Tailwind CSS v4](https://tailwindcss.com/) with Turbopack |
+| **Build & Tooling** | [Vite 6](https://vitejs.dev/) + [vite-plugin-pwa](https://vite-pwa-org.netlify.app/) |
+| **Frontend Framework** | [React 19](https://react.dev/), [TypeScript](https://www.typescriptlang.org/) |
+| **Styling** | [Tailwind CSS v4](https://tailwindcss.com/) |
+| **Neural TTS Engine** | [Kokoro-js](https://github.com/hexgrad/kokoro) (ONNX Runtime Web / WebGPU) |
+| **Background ML Worker** | Native Web Worker (`workers/tts.worker.ts`) |
+| **EPUB Processing** | [JSZip](https://stuk.github.io/jszip/) + Native Browser DOMParser |
 | **PDF Processing** | [PDF.js (`pdfjs-dist`)](https://mozilla.github.io/pdf.js/) |
-| **State Management** | [Zustand](https://github.com/pmndrs/zustand) (with `persist` middleware) |
+| **State & Storage** | [Zustand](https://github.com/pmndrs/zustand) + [idb-keyval](https://github.com/jakearchibald/idb-keyval) (IndexedDB) |
 | **Icons** | [Lucide React](https://lucide.dev/) |
-| **Speech Engine** | OpenAI Audio API (`tts-1`) + Native Web Speech API (`SpeechSynthesis`) |
 
 ---
 
@@ -51,25 +48,28 @@ Transforms PDFs, Markdown files, and text documents into spoken audiobooks with 
 
 ```text
 pdf-audiobook/
-├── app/
-│   ├── api/
-│   │   └── tts/
-│   │       └── route.ts               # Server-side OpenAI TTS proxy & audio stream response
-│   ├── favicon.ico
-│   ├── globals.css                    # Tailwind CSS v4 imports
-│   ├── layout.tsx                     # Root HTML & body shell
-│   └── page.tsx                       # Main application view & playback toolbar
 ├── components/
-│   └── TextReader.tsx                 # Paragraph grouping, sentence viewer & karaoke highlighter
+│   ├── ChapterList.tsx           # Table of Contents modal and chapter selector
+│   ├── ModelStatusBanner.tsx     # Kokoro download & offline readiness badge
+│   └── TextReader.tsx            # Sentence-by-sentence karaoke text view
 ├── hooks/
-│   └── usePremiumAudiobookPlayer.ts   # Dual-deck gapless audio player & synthesis queue hook
+│   └── usePremiumAudiobookPlayer.ts # Dual-deck gapless audio player hooked to Kokoro worker
 ├── lib/
-│   └── pdf.ts                         # Document extraction, sentence segmentation & progress callbacks
+│   ├── epub.ts                   # Client-side EPUB parser & sentence segmenter
+│   ├── pdf.ts                    # PDF.js text extraction
+│   ├── storage.ts                # IndexedDB persistence (idb-keyval) for book & position
+│   ├── voices.ts                 # Kokoro voice options & metadata
+│   └── workerClient.ts           # Typed RPC client communicating with tts.worker
+├── workers/
+│   └── tts.worker.ts             # Dedicated Web Worker hosting Kokoro ONNX model
 ├── store/
-│   └── useAudiobookStore.ts           # Zustand store for bookmarks, drawer state & voice settings
-├── public/                            # Static assets
-├── package.json
-└── tsconfig.json
+│   └── useAudiobookStore.ts      # Zustand store for voice preference & bookmarks
+├── app/
+│   ├── globals.css               # Tailwind CSS v4 setup
+│   └── page.tsx                  # Main reader shell, player toolbar & dropzone
+├── index.html                    # Root HTML shell
+├── vite.config.ts                # Vite & PWA Service Worker configuration
+└── package.json
 ```
 
 ---
@@ -78,8 +78,8 @@ pdf-audiobook/
 
 ### Prerequisites
 
-- **Node.js**: v18.17+ or v20+
-- **Package Manager**: `npm`, `pnpm`, or `yarn`
+- **Node.js**: v18.0.0 or higher
+- **Modern Browser**: Chrome, Edge, Brave, Firefox, or Safari (WebGPU recommended for fastest neural synthesis)
 
 ### Installation
 
@@ -94,42 +94,24 @@ pdf-audiobook/
    npm install
    ```
 
-3. *(Optional)* Configure OpenAI TTS for premium voices:
-   Create a `.env.local` file in the root directory:
-   ```env
-   OPENAI_API_KEY=sk-...
-   ```
-   > **Note:** If `OPENAI_API_KEY` is not provided, the application automatically uses free, built-in browser speech voices with zero setup required.
-
 ---
 
-## 💻 Development & Production Scripts
+## 💻 Available Scripts
 
 | Command | Description |
 | :--- | :--- |
-| `npm run dev` | Starts the Next.js development server with Turbopack at `http://localhost:3000` |
-| `npm run build` | Compiles optimized production build |
-| `npm run start` | Starts the production server |
-| `npm run lint` | Runs Next.js ESLint checks |
+| `npm run dev` | Starts the Vite local development server at `http://localhost:3000` |
+| `npm run build` | Compiles TypeScript and creates optimized PWA production bundle in `dist/` |
+| `npm run preview` | Previews the production build locally with full Service Worker caching |
 
 ---
 
 ## 🎧 How It Works
 
-1. **Upload Document:**
-   - Drop or browse any `.pdf`, `.md`, or `.txt` file into the upload zone.
-   - The file is parsed into page-indexed sentences with live percentage progress.
-
-2. **Select Voice:**
-   - Choose from OpenAI neural voices (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`) or browser voices from the voice selector.
-
-3. **Listen & Follow Along:**
-   - Press **Play** or click any sentence to start listening.
-   - The document automatically scrolls and highlights each sentence in sync with the audio.
-
-4. **Bookmark & Annotate:**
-   - Click the bookmark icon on any sentence or highlight text to save it to your bookmarks drawer.
-   - Open the bookmarks drawer anytime to jump back to previously saved points.
+1. **Launch the App:** Run `npm run dev` or open the installed PWA.
+2. **First-Time Model Cache:** Kokoro's quantized model (~80MB) downloads once on first launch and is permanently stored in browser cache.
+3. **Load an Ebook:** Drop any `.epub` file into the reader. The Table of Contents and chapters are parsed instantly.
+4. **Select a Voice & Play:** Pick from human-grade neural voices like **Heart**, **Bella**, **Adam**, or **Emma**, press Play, and enjoy seamless offline narration.
 
 ---
 

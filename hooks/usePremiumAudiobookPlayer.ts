@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { ttsWorkerClient } from '@/lib/workerClient';
+import { getAudioCacheKey, getCachedAudioBlob, setCachedAudioBlob } from '@/lib/audioCache';
+import { encodeWavBlobsToMp3 } from '@/lib/mp3Encoder';
 
 const SENTENCE_PAUSE_MS = 250;
 
@@ -13,7 +15,27 @@ interface PlayerState {
   error: string | null;
 }
 
-export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') {
+export interface CachingProgress {
+  isCaching: boolean;
+  current: number;
+  total: number;
+  percent: number;
+  speedSec: number | null;
+  etaSec: number | null;
+}
+
+export interface ExportProgress {
+  isExporting: boolean;
+  current: number;
+  total: number;
+  percent: number;
+}
+
+export function usePremiumAudiobookPlayer(
+  chunks: string[],
+  voice = 'af_heart',
+  bookName = 'default_book'
+) {
   const [state, setState] = useState<PlayerState>({
     currentIndex: 0,
     isPlaying: false,
@@ -23,6 +45,12 @@ export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') 
     isNativeFallback: false,
     error: null,
   });
+
+  const [cachingProgress, setCachingProgress] = useState<CachingProgress | null>(null);
+  const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
+  const [lastChunkSpeedSec, setLastChunkSpeedSec] = useState<number | null>(null);
+
+  const abortCachingRef = useRef(false);
 
   // Dual audio decks for gapless handoff
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -61,7 +89,7 @@ export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') 
     };
   }, []);
 
-  // Clear audio cache when voice changes
+  // Clear in-memory URL cache when voice changes
   useEffect(() => {
     clearPauseTimer();
     cacheRef.current.forEach((url) => URL.revokeObjectURL(url));
@@ -75,9 +103,10 @@ export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') 
     }
   }, [voice, chunks.length, state.isPlaying]);
 
-  // Fetch and cache chunk audio blob from local Kokoro Web Worker
+  // Fetch and cache chunk audio blob (checks IndexedDB first, then local Web Worker)
   const fetchChunkAudio = useCallback(
     async (index: number): Promise<string> => {
+      // 1. In-memory check
       if (cacheRef.current.has(index)) {
         return cacheRef.current.get(index)!;
       }
@@ -91,8 +120,20 @@ export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') 
         return '';
       }
 
+      const cacheKey = getAudioCacheKey(bookName, index, voice);
+
       const promise = (async () => {
         try {
+          // 2. Persistent IndexedDB check
+          const cachedBlob = await getCachedAudioBlob(cacheKey);
+          if (cachedBlob) {
+            const url = URL.createObjectURL(cachedBlob);
+            cacheRef.current.set(index, url);
+            return url;
+          }
+
+          // 3. Neural synthesis via local Kokoro Web Worker
+          const startTime = performance.now();
           const res = await ttsWorkerClient.synthesize(
             `chunk-${index}-${Date.now()}`,
             text,
@@ -101,6 +142,14 @@ export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') 
 
           if (!res.audioBlobUrl) {
             throw new Error('Neural synthesis returned empty audio');
+          }
+
+          const elapsed = (performance.now() - startTime) / 1000;
+          setLastChunkSpeedSec(elapsed);
+
+          // Persist blob into IndexedDB
+          if (res.audioBlob) {
+            await setCachedAudioBlob(cacheKey, res.audioBlob);
           }
 
           cacheRef.current.set(index, res.audioBlobUrl);
@@ -113,10 +162,152 @@ export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') 
       inflightRef.current.set(index, promise);
       return promise;
     },
-    [chunks, voice]
+    [chunks, voice, bookName]
   );
 
-  // Pre-synthesize entire document/chapter in background
+  // Pre-synthesize entire chapter in background
+  const cacheChapter = useCallback(
+    async (chapterChunkIndices: number[]) => {
+      if (!chapterChunkIndices.length || voice.startsWith('native:')) return;
+
+      abortCachingRef.current = false;
+      setCachingProgress({
+        isCaching: true,
+        current: 0,
+        total: chapterChunkIndices.length,
+        percent: 0,
+        speedSec: null,
+        etaSec: null,
+      });
+
+      try {
+        let completed = 0;
+        const recentTimes: number[] = [];
+
+        for (let i = 0; i < chapterChunkIndices.length; i++) {
+          if (abortCachingRef.current) break;
+
+          const chunkIdx = chapterChunkIndices[i];
+          const t0 = performance.now();
+          await fetchChunkAudio(chunkIdx);
+          const chunkElapsed = (performance.now() - t0) / 1000;
+
+          if (chunkElapsed > 0.05) {
+            recentTimes.push(chunkElapsed);
+            if (recentTimes.length > 5) recentTimes.shift();
+          }
+
+          completed++;
+          const avgSpeed =
+            recentTimes.length > 0
+              ? recentTimes.reduce((a, b) => a + b, 0) / recentTimes.length
+              : null;
+          const remainingChunks = chapterChunkIndices.length - completed;
+          const etaSec = avgSpeed ? Math.round(remainingChunks * avgSpeed) : null;
+
+          setCachingProgress({
+            isCaching: true,
+            current: completed,
+            total: chapterChunkIndices.length,
+            percent: Math.round((completed / chapterChunkIndices.length) * 100),
+            speedSec: avgSpeed,
+            etaSec,
+          });
+        }
+      } finally {
+        setCachingProgress((prev) => (prev ? { ...prev, isCaching: false } : null));
+      }
+    },
+    [voice, fetchChunkAudio]
+  );
+
+  const cancelCaching = useCallback(() => {
+    abortCachingRef.current = true;
+    setCachingProgress((prev) => (prev ? { ...prev, isCaching: false } : null));
+  }, []);
+
+  // Concatenate chapter audio chunks and export as MP3
+  const downloadChapterMp3 = useCallback(
+    async (chapterTitle: string, chapterChunkIndices: number[]) => {
+      if (!chapterChunkIndices.length) return;
+
+      setExportProgress({
+        isExporting: true,
+        current: 0,
+        total: chapterChunkIndices.length,
+        percent: 0,
+      });
+
+      try {
+        const blobs: Blob[] = [];
+
+        for (let i = 0; i < chapterChunkIndices.length; i++) {
+          const idx = chapterChunkIndices[i];
+          const cacheKey = getAudioCacheKey(bookName, idx, voice);
+          let blob = await getCachedAudioBlob(cacheKey);
+
+          if (!blob) {
+            const raw = chunks[idx];
+            const text = raw ? raw.replace(/\s+/g, ' ').trim() : '';
+            if (text && /\S/.test(text)) {
+              const res = await ttsWorkerClient.synthesize(
+                `export-${idx}-${Date.now()}`,
+                text,
+                voice
+              );
+              if (res.audioBlob) {
+                blob = res.audioBlob;
+                await setCachedAudioBlob(cacheKey, blob);
+              }
+            }
+          }
+
+          if (blob) {
+            blobs.push(blob);
+          }
+        }
+
+        if (blobs.length === 0) {
+          throw new Error('No audio found to export');
+        }
+
+        const mp3Blob = await encodeWavBlobsToMp3(
+          blobs,
+          (p) => {
+            setExportProgress({
+              isExporting: true,
+              current: p.current,
+              total: p.total,
+              percent: p.percent,
+            });
+          },
+          SENTENCE_PAUSE_MS
+        );
+
+        const safeTitle =
+          (chapterTitle || 'Chapter').replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'Audiobook_Chapter';
+        const url = URL.createObjectURL(mp3Blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${safeTitle}.mp3`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        console.error('[Player] MP3 export error:', err);
+        setState((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Failed to export chapter MP3',
+        }));
+      } finally {
+        setExportProgress(null);
+      }
+    },
+    [bookName, voice, chunks]
+  );
+
+  // Pre-synthesize entire document in background
   const synthesizeWholeDocument = useCallback(async () => {
     if (!chunks.length) return;
 
@@ -165,21 +356,25 @@ export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') 
   }, [chunks, voice, fetchChunkAudio]);
 
   const pruneOldChunks = useCallback((currentIdx: number) => {
-    if (!state.synthesisProgress.percent || state.synthesisProgress.percent < 100) {
-      for (const [idx, url] of cacheRef.current.entries()) {
-        if (idx < currentIdx - 2) {
-          URL.revokeObjectURL(url);
-          cacheRef.current.delete(idx);
-        }
+    // Release in-memory Object URLs older than 2 behind current;
+    // IndexedDB keeps persistent audio blobs safe.
+    for (const [idx, url] of cacheRef.current.entries()) {
+      if (idx < currentIdx - 2) {
+        URL.revokeObjectURL(url);
+        cacheRef.current.delete(idx);
       }
     }
-  }, [state.synthesisProgress.percent]);
+  }, []);
 
   // Fallback to Native Speech Synthesis API
   const playNativeSpeech = useCallback(
     (index: number) => {
       if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-        setState((prev) => ({ ...prev, error: 'Web Speech not supported on this device', isPlaying: false }));
+        setState((prev) => ({
+          ...prev,
+          error: 'Web Speech not supported on this device',
+          isPlaying: false,
+        }));
         return;
       }
 
@@ -228,8 +423,12 @@ export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') 
       };
 
       utter.onerror = (e) => {
-        if (e.error !== 'interrupted') {
-          setState((prev) => ({ ...prev, error: `Speech error: ${e.error}`, isPlaying: false }));
+        if (e.error !== 'canceled') {
+          setState((prev) => ({
+            ...prev,
+            error: `Speech synthesis error: ${e.error}`,
+            isPlaying: false,
+          }));
         }
       };
 
@@ -238,34 +437,28 @@ export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') 
     [chunks, voice]
   );
 
-  // Play a specific chunk
+  // Play chunk via local Neural Kokoro TTS
   const playChunk = useCallback(
     async (index: number) => {
-      if (index < 0 || index >= chunks.length) {
-        setState((prev) => ({ ...prev, isPlaying: false, currentIndex: 0 }));
-        return;
-      }
+      if (index < 0 || index >= chunks.length) return;
 
       clearPauseTimer();
+      setState((prev) => ({
+        ...prev,
+        currentIndex: index,
+        isPlaying: true,
+        isLoading: true,
+        error: null,
+      }));
 
-      // Check if user selected native voice
+      // Native browser speech synthesis
       if (voice.startsWith('native:')) {
         playNativeSpeech(index);
         return;
       }
 
-      setState((prev) => ({
-        ...prev,
-        currentIndex: index,
-        isPlaying: true,
-        isLoading: !cacheRef.current.has(index),
-        isNativeFallback: false,
-        error: null,
-      }));
-
       try {
         const audioUrl = await fetchChunkAudio(index);
-
         if (!audioUrl) {
           if (index + 1 < chunks.length) {
             playChunk(index + 1);
@@ -282,12 +475,14 @@ export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') 
 
         // Gapless lookahead: pre-fetch next chunk while current plays
         if (index + 1 < chunks.length) {
-          fetchChunkAudio(index + 1).then((nextUrl) => {
-            if (nextAudioRef.current && nextUrl) {
-              nextAudioRef.current.src = nextUrl;
-              nextAudioRef.current.load();
-            }
-          }).catch(console.warn);
+          fetchChunkAudio(index + 1)
+            .then((nextUrl) => {
+              if (nextAudioRef.current && nextUrl) {
+                nextAudioRef.current.src = nextUrl;
+                nextAudioRef.current.load();
+              }
+            })
+            .catch(console.warn);
         }
 
         audio.oncanplay = () => {
@@ -351,6 +546,12 @@ export function usePremiumAudiobookPlayer(chunks: string[], voice = 'af_heart') 
     playChunk,
     togglePlay,
     synthesizeWholeDocument,
+    cacheChapter,
+    cancelCaching,
+    downloadChapterMp3,
+    cachingProgress,
+    exportProgress,
+    lastChunkSpeedSec,
     next,
     prev,
   };

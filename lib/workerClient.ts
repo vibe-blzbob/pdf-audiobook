@@ -91,7 +91,7 @@ class TTSWorkerClient {
   public async synthesize(id: string, text: string, voice = 'af_heart', speed = 1.0) {
     if (!this.worker) throw new Error('Worker not available');
 
-    return new Promise<{ audioBlobUrl: string; duration?: number }>((resolve, reject) => {
+    return new Promise<{ audioBlobUrl: string; audioBlob?: Blob; duration?: number }>((resolve, reject) => {
       this.pendingRequests.set(id, { resolve, reject });
       this.worker!.postMessage({
         type: 'SYNTHESIZE',

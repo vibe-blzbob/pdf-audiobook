@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@breezystack/lamejs": "^1.2.7",
     "@types/jszip": "^3.4.0",
     "idb-keyval": "^6.3.0",
     "jszip": "^3.10.2",

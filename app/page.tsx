@@ -156,6 +156,16 @@ export default function Home() {
     return fileName?.replace(/\.[^/.]+$/, '') || 'Audiobook Chapter';
   }, [epubBook, currentChapter, fileName]);
 
+  const [exportVoice, setExportVoice] = useState<string>(
+    selectedVoice.startsWith('native:') ? 'af_heart' : selectedVoice
+  );
+
+  useEffect(() => {
+    if (!selectedVoice.startsWith('native:')) {
+      setExportVoice(selectedVoice);
+    }
+  }, [selectedVoice]);
+
   const [chapterCachedCount, setChapterCachedCount] = useState<number>(0);
 
   useEffect(() => {
@@ -165,7 +175,7 @@ export default function Home() {
     }
 
     let isMounted = true;
-    getChapterCacheStatus(fileName, activeChapterChunkIndices, selectedVoice).then((res) => {
+    getChapterCacheStatus(fileName, activeChapterChunkIndices, exportVoice).then((res) => {
       if (isMounted) {
         setChapterCachedCount(res.cachedCount);
       }
@@ -174,7 +184,14 @@ export default function Home() {
     return () => {
       isMounted = false;
     };
-  }, [fileName, activeChapterChunkIndices, selectedVoice, cachingProgress?.percent, currentIndex]);
+  }, [
+    fileName,
+    activeChapterChunkIndices,
+    exportVoice,
+    cachingProgress?.percent,
+    exportProgress?.isExporting,
+    currentIndex,
+  ]);
 
   const { metrics: resourceMetrics } = useResourceMonitor(
     lastChunkSpeedSec || cachingProgress?.speedSec || null
@@ -441,6 +458,22 @@ export default function Home() {
                 </span>
               </div>
 
+              {/* Voice Selection for Chapter Audio & MP3 */}
+              <div className="flex items-center justify-between gap-2 bg-zinc-900/60 px-2 py-1.5 rounded-lg border border-zinc-800/80">
+                <label className="text-[10px] text-zinc-400 font-medium">MP3 Voice:</label>
+                <select
+                  value={exportVoice}
+                  onChange={(e) => setExportVoice(e.target.value)}
+                  className="bg-zinc-950 border border-zinc-700/80 rounded px-2 py-0.5 text-[11px] text-zinc-200 focus:outline-none focus:border-purple-500 cursor-pointer flex-1 max-w-[150px] truncate"
+                >
+                  {KOKORO_VOICES.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.name} ({v.accent} {v.gender})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               {/* Action Buttons: Cache Chapter & Download MP3 */}
               <div className="flex items-center gap-2">
                 {cachingProgress?.isCaching ? (
@@ -453,7 +486,7 @@ export default function Home() {
                   </button>
                 ) : (
                   <button
-                    onClick={() => cacheChapter(activeChapterChunkIndices)}
+                    onClick={() => cacheChapter(activeChapterChunkIndices, exportVoice)}
                     disabled={exportProgress?.isExporting || isSynthesizing}
                     className="flex-1 py-1.5 px-3 rounded-lg text-xs font-medium bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/80 text-zinc-200 hover:text-white transition flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
                   >
@@ -473,7 +506,7 @@ export default function Home() {
                 )}
 
                 <button
-                  onClick={() => downloadChapterMp3(activeChapterTitle, activeChapterChunkIndices)}
+                  onClick={() => downloadChapterMp3(activeChapterTitle, activeChapterChunkIndices, exportVoice)}
                   disabled={exportProgress?.isExporting || cachingProgress?.isCaching}
                   className="flex-1 py-1.5 px-3 rounded-lg text-xs font-medium bg-purple-950/60 hover:bg-purple-900/70 border border-purple-800/70 text-purple-200 hover:text-white transition flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
                 >
@@ -515,7 +548,7 @@ export default function Home() {
                         ? `${cachingProgress.speedSec.toFixed(1)}s / chunk`
                         : 'Starting...'}
                     </span>
-                    <span>{cachingProgress.etaSec != null ? `~${cachingProgress.etaSec}s left` : ''}</span>
+                    <span>{cachingProgress.etaText || ''}</span>
                   </div>
                 </div>
               )}

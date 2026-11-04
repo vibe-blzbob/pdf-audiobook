@@ -1,9 +1,22 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { ttsWorkerClient } from '@/lib/workerClient';
-import { getAudioCacheKey, getCachedAudioBlob, setCachedAudioBlob } from '@/lib/audioCache';
+import {
+  getAudioCacheKey,
+  getCachedAudioBlob,
+  setCachedAudioBlob,
+  clearChapterAudioCache,
+} from '@/lib/audioCache';
 import { encodeWavBlobsToMp3 } from '@/lib/mp3Encoder';
 
 const SENTENCE_PAUSE_MS = 250;
+
+export function formatEta(seconds: number | null): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return '';
+  if (seconds < 60) return `~${seconds}s left`;
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return secs > 0 ? `~${mins}m ${secs}s left` : `~${mins}m left`;
+}
 
 interface PlayerState {
   currentIndex: number;
@@ -22,6 +35,7 @@ export interface CachingProgress {
   percent: number;
   speedSec: number | null;
   etaSec: number | null;
+  etaText: string | null;
 }
 
 export interface ExportProgress {
@@ -58,7 +72,7 @@ export function usePremiumAudiobookPlayer(
 
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const cacheRef = useRef<Map<number, string>>(new Map());
-  const inflightRef = useRef<Map<number, Promise<string>>>(new Map());
+  const inflightRef = useRef<Map<string, Promise<string>>>(new Map());
   const pauseTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const currentIndexRef = useRef(0);
@@ -105,13 +119,18 @@ export function usePremiumAudiobookPlayer(
 
   // Fetch and cache chunk audio blob (checks IndexedDB first, then local Web Worker)
   const fetchChunkAudio = useCallback(
-    async (index: number): Promise<string> => {
-      // 1. In-memory check
-      if (cacheRef.current.has(index)) {
+    async (index: number, voiceOverride?: string): Promise<string> => {
+      const activeVoice = voiceOverride || voice;
+      const isPlayerVoice = activeVoice === voice;
+
+      // 1. In-memory check (only for active listening voice)
+      if (isPlayerVoice && cacheRef.current.has(index)) {
         return cacheRef.current.get(index)!;
       }
-      if (inflightRef.current.has(index)) {
-        return inflightRef.current.get(index)!;
+
+      const inflightKey = `${index}::${activeVoice}`;
+      if (inflightRef.current.has(inflightKey)) {
+        return inflightRef.current.get(inflightKey)!;
       }
 
       const raw = chunks[index];
@@ -120,7 +139,7 @@ export function usePremiumAudiobookPlayer(
         return '';
       }
 
-      const cacheKey = getAudioCacheKey(bookName, index, voice);
+      const cacheKey = getAudioCacheKey(bookName, index, activeVoice);
 
       const promise = (async () => {
         try {
@@ -128,7 +147,7 @@ export function usePremiumAudiobookPlayer(
           const cachedBlob = await getCachedAudioBlob(cacheKey);
           if (cachedBlob) {
             const url = URL.createObjectURL(cachedBlob);
-            cacheRef.current.set(index, url);
+            if (isPlayerVoice) cacheRef.current.set(index, url);
             return url;
           }
 
@@ -137,7 +156,7 @@ export function usePremiumAudiobookPlayer(
           const res = await ttsWorkerClient.synthesize(
             `chunk-${index}-${Date.now()}`,
             text,
-            voice
+            activeVoice
           );
 
           if (!res.audioBlobUrl) {
@@ -152,14 +171,14 @@ export function usePremiumAudiobookPlayer(
             await setCachedAudioBlob(cacheKey, res.audioBlob);
           }
 
-          cacheRef.current.set(index, res.audioBlobUrl);
+          if (isPlayerVoice) cacheRef.current.set(index, res.audioBlobUrl);
           return res.audioBlobUrl;
         } finally {
-          inflightRef.current.delete(index);
+          inflightRef.current.delete(inflightKey);
         }
       })();
 
-      inflightRef.current.set(index, promise);
+      inflightRef.current.set(inflightKey, promise);
       return promise;
     },
     [chunks, voice, bookName]
@@ -167,8 +186,9 @@ export function usePremiumAudiobookPlayer(
 
   // Pre-synthesize entire chapter in background
   const cacheChapter = useCallback(
-    async (chapterChunkIndices: number[]) => {
-      if (!chapterChunkIndices.length || voice.startsWith('native:')) return;
+    async (chapterChunkIndices: number[], targetVoice?: string) => {
+      const activeVoice = targetVoice || voice;
+      if (!chapterChunkIndices.length || activeVoice.startsWith('native:')) return;
 
       abortCachingRef.current = false;
       setCachingProgress({
@@ -178,6 +198,7 @@ export function usePremiumAudiobookPlayer(
         percent: 0,
         speedSec: null,
         etaSec: null,
+        etaText: null,
       });
 
       try {
@@ -189,7 +210,7 @@ export function usePremiumAudiobookPlayer(
 
           const chunkIdx = chapterChunkIndices[i];
           const t0 = performance.now();
-          await fetchChunkAudio(chunkIdx);
+          await fetchChunkAudio(chunkIdx, activeVoice);
           const chunkElapsed = (performance.now() - t0) / 1000;
 
           if (chunkElapsed > 0.05) {
@@ -212,6 +233,7 @@ export function usePremiumAudiobookPlayer(
             percent: Math.round((completed / chapterChunkIndices.length) * 100),
             speedSec: avgSpeed,
             etaSec,
+            etaText: formatEta(etaSec),
           });
         }
       } finally {
@@ -226,10 +248,11 @@ export function usePremiumAudiobookPlayer(
     setCachingProgress((prev) => (prev ? { ...prev, isCaching: false } : null));
   }, []);
 
-  // Concatenate chapter audio chunks and export as MP3
+  // Concatenate chapter audio chunks and export as MP3 (auto-clears cache afterward)
   const downloadChapterMp3 = useCallback(
-    async (chapterTitle: string, chapterChunkIndices: number[]) => {
+    async (chapterTitle: string, chapterChunkIndices: number[], targetVoice?: string) => {
       if (!chapterChunkIndices.length) return;
+      const activeVoice = targetVoice || voice;
 
       setExportProgress({
         isExporting: true,
@@ -243,7 +266,7 @@ export function usePremiumAudiobookPlayer(
 
         for (let i = 0; i < chapterChunkIndices.length; i++) {
           const idx = chapterChunkIndices[i];
-          const cacheKey = getAudioCacheKey(bookName, idx, voice);
+          const cacheKey = getAudioCacheKey(bookName, idx, activeVoice);
           let blob = await getCachedAudioBlob(cacheKey);
 
           if (!blob) {
@@ -253,7 +276,7 @@ export function usePremiumAudiobookPlayer(
               const res = await ttsWorkerClient.synthesize(
                 `export-${idx}-${Date.now()}`,
                 text,
-                voice
+                activeVoice
               );
               if (res.audioBlob) {
                 blob = res.audioBlob;
@@ -294,6 +317,18 @@ export function usePremiumAudiobookPlayer(
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
+
+        // Auto-clear cache after downloading the MP3
+        await clearChapterAudioCache(bookName, chapterChunkIndices, activeVoice);
+        if (activeVoice === voice) {
+          for (const idx of chapterChunkIndices) {
+            const u = cacheRef.current.get(idx);
+            if (u) {
+              URL.revokeObjectURL(u);
+              cacheRef.current.delete(idx);
+            }
+          }
+        }
       } catch (err) {
         console.error('[Player] MP3 export error:', err);
         setState((prev) => ({
@@ -356,8 +391,6 @@ export function usePremiumAudiobookPlayer(
   }, [chunks, voice, fetchChunkAudio]);
 
   const pruneOldChunks = useCallback((currentIdx: number) => {
-    // Release in-memory Object URLs older than 2 behind current;
-    // IndexedDB keeps persistent audio blobs safe.
     for (const [idx, url] of cacheRef.current.entries()) {
       if (idx < currentIdx - 2) {
         URL.revokeObjectURL(url);

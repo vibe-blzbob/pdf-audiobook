@@ -263,11 +263,15 @@ export function usePremiumAudiobookPlayer(
     setCachingProgress((prev) => (prev ? { ...prev, isCaching: false } : null));
   }, []);
 
-  // Concatenate chapter audio chunks and export as MP3 (auto-clears cache afterward)
+  // Concatenate chapter audio chunks and export as MP3 (caches first, then encodes & auto-clears)
   const downloadChapterMp3 = useCallback(
     async (chapterTitle: string, chapterChunkIndices: number[], targetVoice?: string) => {
       if (!chapterChunkIndices.length) return;
       const activeVoice = targetVoice || voice;
+
+      // 1. Trigger caching first so all sentences are synthesized into IndexedDB with full progress and ETA
+      await cacheChapter(chapterChunkIndices, activeVoice);
+      if (abortCachingRef.current || abortBatchRef.current) return;
 
       setExportProgress({
         isExporting: true,
@@ -280,33 +284,17 @@ export function usePremiumAudiobookPlayer(
         const blobs: Blob[] = [];
 
         for (let i = 0; i < chapterChunkIndices.length; i++) {
+          if (abortBatchRef.current) break;
           const idx = chapterChunkIndices[i];
           const cacheKey = getAudioCacheKey(bookName, idx, activeVoice);
-          let blob = await getCachedAudioBlob(cacheKey);
-
-          if (!blob) {
-            const raw = chunks[idx];
-            const text = raw ? raw.replace(/\s+/g, ' ').trim() : '';
-            if (text && /\S/.test(text)) {
-              const res = await ttsWorkerClient.synthesize(
-                `export-${idx}-${Date.now()}`,
-                text,
-                activeVoice
-              );
-              if (res.audioBlob) {
-                blob = res.audioBlob;
-                await setCachedAudioBlob(cacheKey, blob);
-              }
-            }
-          }
-
+          const blob = await getCachedAudioBlob(cacheKey);
           if (blob) {
             blobs.push(blob);
           }
         }
 
-        if (blobs.length === 0) {
-          throw new Error('No audio found to export');
+        if (blobs.length === 0 || abortBatchRef.current) {
+          return;
         }
 
         const mp3Blob = await encodeWavBlobsToMp3(
@@ -321,6 +309,8 @@ export function usePremiumAudiobookPlayer(
           },
           SENTENCE_PAUSE_MS
         );
+
+        if (abortBatchRef.current) return;
 
         const safeTitle =
           (chapterTitle || 'Chapter').replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'Audiobook_Chapter';
@@ -354,7 +344,7 @@ export function usePremiumAudiobookPlayer(
         setExportProgress(null);
       }
     },
-    [bookName, voice, chunks]
+    [bookName, voice, cacheChapter]
   );
 
   // Sequentially process and download a queue of chapters, auto-clearing memory after each
@@ -392,7 +382,10 @@ export function usePremiumAudiobookPlayer(
 
   const cancelBatch = useCallback(() => {
     abortBatchRef.current = true;
+    abortCachingRef.current = true;
     setBatchProgress(null);
+    setExportProgress(null);
+    setCachingProgress(null);
   }, []);
 
   // Pre-synthesize entire document in background

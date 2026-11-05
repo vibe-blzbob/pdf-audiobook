@@ -45,6 +45,19 @@ export interface ExportProgress {
   percent: number;
 }
 
+export interface ChapterDownloadTarget {
+  chapterIndex: number;
+  chapterTitle: string;
+  chunkIndices: number[];
+}
+
+export interface BatchQueueProgress {
+  isQueueRunning: boolean;
+  currentChapterIndex: number;
+  totalChapters: number;
+  currentChapterTitle: string;
+}
+
 export function usePremiumAudiobookPlayer(
   chunks: string[],
   voice = 'af_heart',
@@ -62,9 +75,11 @@ export function usePremiumAudiobookPlayer(
 
   const [cachingProgress, setCachingProgress] = useState<CachingProgress | null>(null);
   const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
+  const [batchProgress, setBatchProgress] = useState<BatchQueueProgress | null>(null);
   const [lastChunkSpeedSec, setLastChunkSpeedSec] = useState<number | null>(null);
 
   const abortCachingRef = useRef(false);
+  const abortBatchRef = useRef(false);
 
   // Dual audio decks for gapless handoff
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -342,6 +357,44 @@ export function usePremiumAudiobookPlayer(
     [bookName, voice, chunks]
   );
 
+  // Sequentially process and download a queue of chapters, auto-clearing memory after each
+  const batchDownloadChapters = useCallback(
+    async (targets: ChapterDownloadTarget[], targetVoice?: string) => {
+      if (!targets.length) return;
+      abortBatchRef.current = false;
+      const activeVoice = targetVoice || voice;
+
+      try {
+        for (let i = 0; i < targets.length; i++) {
+          if (abortBatchRef.current) break;
+
+          const target = targets[i];
+          setBatchProgress({
+            isQueueRunning: true,
+            currentChapterIndex: i + 1,
+            totalChapters: targets.length,
+            currentChapterTitle: target.chapterTitle,
+          });
+
+          await downloadChapterMp3(target.chapterTitle, target.chunkIndices, activeVoice);
+
+          if (abortBatchRef.current) break;
+
+          // Brief pause between chapters to yield to garbage collector and let download stream finish
+          await new Promise((r) => setTimeout(r, 1200));
+        }
+      } finally {
+        setBatchProgress(null);
+      }
+    },
+    [voice, downloadChapterMp3]
+  );
+
+  const cancelBatch = useCallback(() => {
+    abortBatchRef.current = true;
+    setBatchProgress(null);
+  }, []);
+
   // Pre-synthesize entire document in background
   const synthesizeWholeDocument = useCallback(async () => {
     if (!chunks.length) return;
@@ -582,8 +635,11 @@ export function usePremiumAudiobookPlayer(
     cacheChapter,
     cancelCaching,
     downloadChapterMp3,
+    batchDownloadChapters,
+    cancelBatch,
     cachingProgress,
     exportProgress,
+    batchProgress,
     lastChunkSpeedSec,
     next,
     prev,

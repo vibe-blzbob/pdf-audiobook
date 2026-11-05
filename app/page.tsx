@@ -19,10 +19,15 @@ import {
   Square,
   CheckCircle2,
   Database,
+  Layers,
+  FastForward,
 } from 'lucide-react';
 import { extractChunksFromFile, DocumentChunk } from '@/lib/pdf';
 import { parseEpubFile, type EpubBook } from '@/lib/epub';
-import { usePremiumAudiobookPlayer } from '@/hooks/usePremiumAudiobookPlayer';
+import {
+  usePremiumAudiobookPlayer,
+  type ChapterDownloadTarget,
+} from '@/hooks/usePremiumAudiobookPlayer';
 import { TextReader } from '@/components/TextReader';
 import { ChapterList } from '@/components/ChapterList';
 import { ModelStatusBanner } from '@/components/ModelStatusBanner';
@@ -95,8 +100,11 @@ export default function Home() {
     cacheChapter,
     cancelCaching,
     downloadChapterMp3,
+    batchDownloadChapters,
+    cancelBatch,
     cachingProgress,
     exportProgress,
+    batchProgress,
     lastChunkSpeedSec,
     next,
     prev,
@@ -155,6 +163,27 @@ export default function Home() {
     }
     return fileName?.replace(/\.[^/.]+$/, '') || 'Audiobook Chapter';
   }, [epubBook, currentChapter, fileName]);
+
+  const allChapterTargets: ChapterDownloadTarget[] = useMemo(() => {
+    if (!epubBook || epubBook.chapters.length === 0) {
+      return [
+        {
+          chapterIndex: 0,
+          chapterTitle: activeChapterTitle,
+          chunkIndices: activeChapterChunkIndices,
+        },
+      ];
+    }
+    return epubBook.chapters.map((ch, idx) => ({
+      chapterIndex: idx,
+      chapterTitle: ch.title,
+      chunkIndices: ch.chunks.map((c) => c.index),
+    }));
+  }, [epubBook, activeChapterTitle, activeChapterChunkIndices]);
+
+  const remainingChapterTargets: ChapterDownloadTarget[] = useMemo(() => {
+    return allChapterTargets.slice(activeChapterIndex);
+  }, [allChapterTargets, activeChapterIndex]);
 
   const [exportVoice, setExportVoice] = useState<string>(
     selectedVoice.startsWith('native:') ? 'af_heart' : selectedVoice
@@ -347,7 +376,11 @@ export default function Home() {
         {chunks.length > 0 && (
           <ResourceMonitor
             metrics={resourceMetrics}
-            isProcessing={cachingProgress?.isCaching || exportProgress?.isExporting}
+            isProcessing={
+              cachingProgress?.isCaching ||
+              exportProgress?.isExporting ||
+              batchProgress?.isQueueRunning
+            }
           />
         )}
       </div>
@@ -571,6 +604,83 @@ export default function Home() {
                       style={{ width: `${exportProgress.percent}%` }}
                     />
                   </div>
+                </div>
+              )}
+
+              {/* Automated Batch Queue (Available for books with chapters) */}
+              {allChapterTargets.length > 1 && (
+                <div className="flex flex-col gap-2 pt-2 border-t border-zinc-800/80">
+                  <div className="flex items-center justify-between text-[11px] text-zinc-400">
+                    <span className="font-semibold text-zinc-300 flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-purple-400" />
+                      Batch Auto-Download
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono">
+                      Auto-clears RAM & cache
+                    </span>
+                  </div>
+
+                  {batchProgress?.isQueueRunning ? (
+                    <div className="w-full bg-purple-950/40 border border-purple-800/70 rounded-lg p-2.5 flex flex-col gap-2">
+                      <div className="flex items-center justify-between text-xs text-purple-200">
+                        <span className="flex items-center gap-1.5 font-medium truncate">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-400 flex-shrink-0" />
+                          <span className="truncate">
+                            Chapter {batchProgress.currentChapterIndex} of {batchProgress.totalChapters}: {batchProgress.currentChapterTitle}
+                          </span>
+                        </span>
+                        <button
+                          onClick={cancelBatch}
+                          className="px-2 py-0.5 rounded text-[10px] font-semibold bg-red-950/80 hover:bg-red-900 border border-red-800 text-red-200 transition cursor-pointer flex-shrink-0 ml-2"
+                        >
+                          Stop Queue
+                        </button>
+                      </div>
+                      <div className="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden">
+                        <div
+                          className="bg-purple-400 h-full transition-all duration-300"
+                          style={{
+                            width: `${Math.round(
+                              (batchProgress.currentChapterIndex / batchProgress.totalChapters) * 100
+                            )}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => batchDownloadChapters(allChapterTargets, exportVoice)}
+                        disabled={
+                          exportProgress?.isExporting ||
+                          cachingProgress?.isCaching ||
+                          batchProgress?.isQueueRunning ||
+                          isSynthesizing
+                        }
+                        className="flex-1 py-1.5 px-2 rounded-lg text-xs font-medium bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/80 text-zinc-200 hover:text-white transition flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                        title="Download all chapters from Chapter 1 to the end"
+                      >
+                        <Layers className="w-3.5 h-3.5 text-purple-400" />
+                        <span>All Chapters ({allChapterTargets.length})</span>
+                      </button>
+
+                      <button
+                        onClick={() => batchDownloadChapters(remainingChapterTargets, exportVoice)}
+                        disabled={
+                          exportProgress?.isExporting ||
+                          cachingProgress?.isCaching ||
+                          batchProgress?.isQueueRunning ||
+                          isSynthesizing ||
+                          remainingChapterTargets.length === 0
+                        }
+                        className="flex-1 py-1.5 px-2 rounded-lg text-xs font-medium bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/80 text-zinc-200 hover:text-white transition flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                        title="Download remaining chapters starting from currently selected chapter"
+                      >
+                        <FastForward className="w-3.5 h-3.5 text-purple-400" />
+                        <span>From Current ({remainingChapterTargets.length})</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
